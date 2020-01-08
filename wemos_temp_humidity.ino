@@ -1,29 +1,33 @@
 /*******************************************************************
- *  Read YouTube Channel statistics from the YouTube API           *
+ *  Read Temperature and Humidity values from DHT22 sensor         *
  *  This sketch uses the WiFiManager Library for configuraiton     *
  *  Using DoubleResetDetector to launch config mode                *
+ *  Using Adafruit DHT library for reading the sensor data         *
+ *  Using ThingSpeak to store data to ThingSpeak channel           *
  *                                                                 *
- *  By Brian Lough                                                 *
- *  https://www.youtube.com/channel/UCezJOfu7OtqGzd5xrP3q6WA       *
+ *  based on sketch made by By Brian Lough                         *
+ *  https://www.youtube.com/watch?v=l9Gl1yKvMNg                    *
  *******************************************************************/
 
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 
-
 #include <DoubleResetDetector.h>
 // For entering Config mode by pressing reset twice
 // Available on the library manager (DoubleResetDetector)
+// used v 1.0.2
 // https://github.com/datacute/DoubleResetDetector
 
 #include <ArduinoJson.h>
 // Required for the YouTubeApi and used for the config file
 // Available on the library manager (ArduinoJson)
+// used v 6.13.0
 // https://github.com/bblanchon/ArduinoJson
 
 #include <WiFiManager.h>
 // For configuring the Wifi credentials without re-programing
 // Availalbe on library manager (WiFiManager)
+// used v 0.14.0
 // https://github.com/tzapu/WiFiManager
 
 // For storing configurations
@@ -34,13 +38,18 @@
 #include <ESP8266WebServer.h>     //Local WebServer used to serve the configuration portal
 
 #include "DHT.h"
+
+#include "ThingSpeak.h"
+// for uploading sensor data to ThingSpeak
+// used v 1.5.0
+
 #define DHTPIN D4     // what pin we're connected to
 #define DHTTYPE DHT22   // DHT 22  (AM2302)
 
 
 char apiKey[42] = "";
 char channelId[42] = "";
-
+unsigned long channelNumber = 333553;
 
 WiFiClient client;
 
@@ -55,7 +64,7 @@ bool shouldSaveConfig = false;
 // Number of seconds after reset during which a
 // subseqent reset will be considered a double reset.
 // This sketch uses drd.stop() rather than relying on the timeout
-#define DRD_TIMEOUT 10
+#define DRD_TIMEOUT 5
 
 // RTC Memory Address for the DoubleResetDetector to use
 #define DRD_ADDRESS 0
@@ -63,11 +72,6 @@ bool shouldSaveConfig = false;
 #define AP_NAME "WEMOS_42eb"
 #define AP_PASSWORD "password"
 
-
-unsigned long myChannelNumber = 953239;
-const char * myWriteAPIKey = "sdfsdfsdf";
-
-const char* host = "api.iotguru.cloud";
 
 DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
 DHT dht(DHTPIN, DHTTYPE);
@@ -125,9 +129,8 @@ void setup() {
   }
 
   strcpy(apiKey, customApiKey.getValue());
-  //strcpy(channelId, customChannelId.getValue());
+  strcpy(channelId, customChannelId.getValue());
   
-
   if (shouldSaveConfig) {
     saveConfig();
   }
@@ -135,17 +138,17 @@ void setup() {
   digitalWrite(LED_BUILTIN, HIGH);  // Turn the LED off by making the voltage HIGH
   // Force Config mode if there is no API key
   if(strcmp(apiKey, "") > 0) {
-    Serial.println("Init weather api");
-    //api = new YoutubeApi(apiKey, client);
+    Serial.println("Init ThingSpeak");
+      ThingSpeak.begin(client);  // Initialize ThingSpeak
   } else {
     Serial.println("Forcing Config Mode");
     forceConfigMode();
   }
   Serial.println("");
-  Serial.println("Weather API key:");
+  Serial.print("Weather API key:");
   Serial.println(apiKey);
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
+  
+  Serial.print("WiFi connected. IP address: ");
   IPAddress ip = WiFi.localIP();
   Serial.println(ip);
 
@@ -171,33 +174,39 @@ bool loadConfig() {
 
   configFile.readBytes(buf.get(), size);
 
-  StaticJsonBuffer<200> jsonBuffer;
-  JsonObject& json = jsonBuffer.parseObject(buf.get());
-
-  if (!json.success()) {
-    Serial.println("Failed to parse config file");
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, buf.get());
+ 
+  if (error) {
+    Serial.print(F("Failed to parse config file with code "));
+    Serial.println(error.c_str());
     return false;
   }
 
-  strcpy(apiKey, json["apiKey"]);
-  //strcpy(channelId, json["channelId"]);
-  Serial.println(apiKey);
+  if (doc.containsKey("apiKey")) {
+    strcpy(apiKey, doc["apiKey"]);
+  }
+  if (doc.containsKey("channelId")) {
+    strcpy(channelId, doc["channelId"]);
+  }
+  Serial.print("api key = ");
+  Serial.print(apiKey);
+  Serial.print(", channel Id = ");
+  Serial.println(channelId);
   return true;
 }
 
 bool saveConfig() {
-  StaticJsonBuffer<200> jsonBuffer;
-  JsonObject& json = jsonBuffer.createObject();
-  json["apiKey"] = apiKey;
-  json["channelId"] = channelId;
+  StaticJsonDocument<200> doc;
+  doc["apiKey"] = apiKey;
+  doc["channelId"] = channelId;
 
   File configFile = SPIFFS.open(CONFIG_FILE_NAME, "w");
   if (!configFile) {
     Serial.println("Failed to open config file for writing");
     return false;
   }
-
-  json.printTo(configFile);
+  serializeJson(doc, configFile);
   return true;
 }
 
@@ -220,50 +229,21 @@ void loop() {
     Serial.print(" %\t");
     Serial.print("Temperature: ");
     Serial.println(temperature);
-    Serial.println("weather updated");
+
+    ThingSpeak.setField(1, temperature);
+    ThingSpeak.setField(2, humidity);
+
+    Serial.print("api key = ");
+    Serial.print(apiKey);
+    Serial.print(", channel Id = ");
+    Serial.println(channelId);
   
-  float value = temperature;
-
-// make TCP connections
-  WiFiClient client;
-  const int httpPort = 80;
-  if (!client.connect(host, httpPort)) {
-    return;
-  }
-
-  String tempUrl = "http://api.iotguru.cloud/measurement/create/sdfsdf/temp/" + String(temperature);
-  tempUrl+="\r\n";
-  Serial.print(tempUrl);
-  // Request to the server
-  client.print(String("GET ") + tempUrl + " HTTP/1.1\r\n" +
-               "Host: " + host + "\r\n" + 
-               "Connection: close\r\n\r\n");
-delay(200);
-// Read all the lines of the reply from server and print them to Serial
-Serial.println("receiving from remote server");
-// not testing 'client.connected()' since we do not need to send data here
-
-  while (client.available()) {
-    char ch = static_cast<char>(client.read());
-    Serial.print(ch);
-  }
-
-  String humidityUrl = "http://api.iotguru.cloud/measurement/create/sdfsdf/humidity/" + String(humidity);
-  humidityUrl+="\r\n";
-  Serial.print(humidityUrl);
-  // Request to the server
-  client.print(String("GET ") + humidityUrl + " HTTP/1.1\r\n" +
-               "Host: " + host + "\r\n" + 
-               "Connection: close\r\n\r\n");
-   delay(200);
-// Read all the lines of the reply from server and print them to Serial
-Serial.println("receiving from remote server");
-// not testing 'client.connected()' since we do not need to send data here
-
-  while (client.available()) {
-    char ch = static_cast<char>(client.read());
-    Serial.print(ch);
-  }
+    int x = ThingSpeak.writeFields(atol(channelId), apiKey);
+    if(x == 200) {
+      Serial.println("Channel update successful.");
+    } else{
+      Serial.println("Problem updating channel. HTTP error code " + String(x));
+    }
     api_lasttime = millis();
   }
 }
