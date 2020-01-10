@@ -5,7 +5,7 @@
  *  Using Adafruit DHT library for reading the sensor data         *
  *  Using ThingSpeak to store data to ThingSpeak channel           *
  *                                                                 *
- *  based on sketch made by By Brian Lough                         *
+ *  based on sketch made by Brian Lough                            *
  *  https://www.youtube.com/watch?v=l9Gl1yKvMNg                    *
  *******************************************************************/
 
@@ -51,12 +51,8 @@ char apiKey[42] = "";
 char channelId[42] = "";
 unsigned long channelNumber = 333553;
 
-WiFiClient client;
-
 unsigned long api_mtbs = 60000; //mean time between api requests
 unsigned long api_lasttime;   //last time api request has been done
-
-long subs = 0;
 
 // flag for saving data
 bool shouldSaveConfig = false;
@@ -69,10 +65,11 @@ bool shouldSaveConfig = false;
 // RTC Memory Address for the DoubleResetDetector to use
 #define DRD_ADDRESS 0
 #define CONFIG_FILE_NAME "/apconfig.json"
-#define AP_NAME "WEMOS_42eb"
+#define AP_NAME_PREFIX "WEMOS_"
 #define AP_PASSWORD "password"
 
 
+WiFiClient client;
 DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -94,9 +91,8 @@ void configModeCallback (WiFiManager *myWiFiManager) {
 }
 
 void setup() {
-
   Serial.begin(115200);
-  dht.begin();
+
 
   if (!SPIFFS.begin()) {
     Serial.println("Failed to mount FS");
@@ -110,6 +106,8 @@ void setup() {
   WiFiManager wifiManager;
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setSaveConfigCallback(saveConfigCallback);
+  wifiManager.setDebugOutput(true);
+
 
   // Adding an additional config on the WIFI manager webpage for the API Key and Channel ID
   WiFiManagerParameter customChannelId("channelId", "channelId", channelId, 42);
@@ -118,14 +116,27 @@ void setup() {
   wifiManager.addParameter(&customChannelId);
   wifiManager.addParameter(&customApiKey);
 
+  String ssid = AP_NAME_PREFIX + String(ESP.getChipId());
   if (drd.detectDoubleReset()) {
     Serial.println("Double Reset Detected");
-    forceConfigMode();
-    //wifiManager.resetSettings();
-    //wifiManager.startConfigPortal(AP_NAME, AP_PASSWORD);
+    /*
+    WifiManager library has an issue  - startConfigPortal function hangs from time to time.
+    to avoid such behaviour the following workaround is used:
+    1) call wifiManager.setBreakAfterConfig(true);
+    2) perform the ESP.restart(); if wifiManager.startConfigPortal returns false
+    drawback of the workaround is that in case password is incorrectly set for SSID, 
+    it will be saved and the device will enter into the config mode.
+    */
+    wifiManager.setBreakAfterConfig(true); //workaround for hanging startConfigPortal 
+    if (!wifiManager.startConfigPortal(ssid.c_str(), AP_PASSWORD)) {
+      Serial.println("Failed to connect"); 
+      ESP.restart(); ////workaround for hanging startConfigPortal
+    }
   } else {
     Serial.println("No Double Reset Detected");
-    wifiManager.autoConnect(AP_NAME, AP_PASSWORD);
+    if (wifiManager.autoConnect(ssid.c_str(), AP_PASSWORD)) {
+      Serial.println("connected to wifi");
+    }
   }
 
   strcpy(apiKey, customApiKey.getValue());
@@ -139,7 +150,7 @@ void setup() {
   // Force Config mode if there is no API key
   if(strcmp(apiKey, "") > 0) {
     Serial.println("Init ThingSpeak");
-      ThingSpeak.begin(client);  // Initialize ThingSpeak
+    ThingSpeak.begin(client);  // Initialize ThingSpeak
   } else {
     Serial.println("Forcing Config Mode");
     forceConfigMode();
@@ -147,13 +158,17 @@ void setup() {
   Serial.println("");
   Serial.print("Weather API key:");
   Serial.println(apiKey);
+
+  Serial.print("SSID:");
+  Serial.println(WiFi.SSID());
   
   Serial.print("WiFi connected. IP address: ");
   IPAddress ip = WiFi.localIP();
   Serial.println(ip);
 
   drd.stop();
-
+  
+  dht.begin();
 }
 
 bool loadConfig() {
@@ -220,7 +235,6 @@ void forceConfigMode() {
 }
 
 void loop() {
-
   if (millis() - api_lasttime > api_mtbs) {
     float temperature = dht.readTemperature();
     float humidity  = dht.readHumidity();  
